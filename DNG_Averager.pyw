@@ -71,6 +71,8 @@ def average_images_thread(file_paths, save_path):
             cpu_percent = psutil.cpu_percent()
             memory_percent = psutil.virtual_memory().percent
             details_var.set(f"Threads: {os.cpu_count()}\nCPU utilization: {cpu_percent}%\nMemory utilization: {memory_percent}%")
+            
+            result_queue.task_done()
 
         except queue.Empty:
             pass
