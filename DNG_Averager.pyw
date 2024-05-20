@@ -3,22 +3,13 @@ from tkinter import filedialog, ttk
 import numpy as np
 import rawpy
 from PIL import Image, ImageTk, ExifTags
-import threading
-import subprocess
+from multiprocessing import Pool
 import os
-import queue
 import psutil
 import sys
 from fractions import Fraction
 
-# Get the script directory and the path to exiftool
-script_directory = os.path.dirname(os.path.abspath(sys.argv[0]))
-exiftool_path = os.path.join(script_directory, "exiftool.exe")
-
-# Queue for inter-thread communication
-result_queue = queue.Queue()
-
-def process_image(file_path, index, total_files):
+def process_image(file_path):
     """Process a single image file and return the result."""
     exposure_time = 0
     with rawpy.imread(file_path) as raw:
@@ -28,65 +19,29 @@ def process_image(file_path, index, total_files):
         for (k,v) in img_exif.items():
             if ExifTags.TAGS.get(k) == 'ExposureTime':
                 exposure_time = v
-    result_queue.put((index, img, exposure_time))
-    progress_var.set(index + 1)
-    status_var.set(f"Processed image {index + 1}/{total_files}")
-    app.update_idletasks()  # Update the UI
+    print("Imported ", file_path)
+    return img, exposure_time
 
-def update_preview_image(average_image_array):
+def update_preview_image(average_image):
     """Update the preview image in the UI."""
-    img = Image.fromarray(np.uint8(average_image_array))
+    img = Image.fromarray(np.uint8(average_image))
     img.thumbnail((600, 600))
     img_tk = ImageTk.PhotoImage(img)
     preview_image_label.config(image=img_tk)
     preview_image_label.image = img_tk
 
-def process_images_thread(file_paths, save_path):
-    """Process the selected images into the queue"""
-    total_files = len(file_paths)
+def update_status(average_image, processed_count, total_images):
+    if processed_count % 100 == 1 or processed_count == total_images:
+        update_preview_image(average_image / processed_count)
 
-    for index, file_path in enumerate(file_paths):
-        process_image(file_path, index, total_files)
-        
-def average_images_thread(file_paths, save_path):
-    """Average queued images"""
-    total_files = len(file_paths)
-    total_exposure_time = 0
-    average_image = None
-    processed_count = 0
-    while processed_count < total_files:
-        try:
-            index, img, exposure_time = result_queue.get(timeout=0.1)
-            processed_count += 1
-            total_exposure_time += exposure_time
+    progress_var.set(progress_var.get() + 1)
+    status_var.set(f"Processed image {progress_var.get()}/{total_images}")
 
-            if average_image is None:
-                average_image = img
-            else:
-                average_image = (average_image * index + img) / (index + 1)
-
-            if processed_count % 100 == 0 or processed_count == total_files:
-                update_preview_image(average_image)
-
-            cpu_percent = psutil.cpu_percent()
-            memory_percent = psutil.virtual_memory().percent
-            details_var.set(f"Threads: {os.cpu_count()}\nCPU utilization: {cpu_percent}%\nMemory utilization: {memory_percent}%")
-            
-            result_queue.task_done()
-
-        except queue.Empty:
-            pass
-
-    # Save the averaged image with EXIF data
-    average_image = np.clip(average_image, 0, 255).astype(np.uint8)
-    img = Image.fromarray(average_image)
-    img_exif = img.getexif()
-    # 33434 exif ExposureTime numerical code
-    img_exif[33434] = total_exposure_time
-    img.save(save_path, exif=img_exif)
-
-    status_var.set("Finished!")
-    app.bell()
+    cpu_percent = psutil.cpu_percent()
+    memory_percent = psutil.virtual_memory().percent
+    details_var.set(f"Threads: {os.cpu_count()}\nCPU utilization: {cpu_percent}%\nMemory utilization: {memory_percent}%")
+    
+    app.update_idletasks()  # Update the UI
 
 def process_images():
     """Process the selected images."""
@@ -103,14 +58,35 @@ def process_images():
     status_var.set("Starting to process images...")
     progress_var.set(0)
     progress_bar.config(maximum=len(file_paths))
+	
+    total_images = len(file_paths)
+    processed_count = 0
+    total_exposure_time = 0
+    average_image = None
+    
+    with Pool(processes=os.cpu_count()) as pool:
+        for img, exposure_time in pool.imap_unordered(process_image, file_paths):
+            total_exposure_time += exposure_time
+            processed_count += 1
+            if average_image is None:
+                average_image = img
+            else:
+                average_image += img
+            update_status(average_image, processed_count, total_images)
+    average_image = average_image / total_images
+	        
+    # Save the averaged image with EXIF data
+    print("Saving ", save_path)
+    average_image = np.clip(average_image, 0, 255).astype(np.uint8)
+    img = Image.fromarray(average_image)
+    img_exif = img.getexif()
+    # 33434 exif ExposureTime numerical code
+    img_exif[33434] = total_exposure_time
+    img.save(save_path, exif=img_exif)
 
-    threads = [
-    threading.Thread(target=process_images_thread, args=(file_paths, save_path)),
-    threading.Thread(target=average_images_thread, args=(file_paths, save_path)),
-    ]
+    status_var.set("Finished!")
+    app.bell()
 
-    for t in threads:
-        t.start()
 
 app = tk.Tk()
 app.title("DNG Averager")
@@ -146,3 +122,4 @@ preview_image_label = ttk.Label(frame)
 preview_image_label.grid(row=5, column=0, columnspan=2, padx=(10, 10), pady=(20, 0))
 
 app.mainloop()
+
